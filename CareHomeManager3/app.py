@@ -24,28 +24,24 @@ except Exception:
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error(
-        "⚠️ 雲端資料庫連線失敗，請檢查 SUPABASE_URL 與 SUPABASE_KEY 設定。"
-    )
+    st.error("⚠️ 雲端資料庫連線失敗，請檢查 SUPABASE_URL 與 SUPABASE_KEY 設定。")
     st.stop()
-
 
 def get_settings():
     res = supabase.table("system_settings").select("*").execute()
-    settings = {item["key"]: item["value"] for item in res.data}
+    settings = {item["key"]: float(item["value"]) for item in res.data}
     return settings
-
 
 # ==========================================
 # 2. 登入與 Session 管理
 # ==========================================
-st.set_page_config(page_title="機構排休預約系統", layout="wide")
+st.set_page_config(page_title="家園預約休假系統", layout="wide")
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
 if st.session_state.user is None:
-    st.title("🏥 機構內部排休預約系統 - 登入")
+    st.title("🏥 家園預約休假系統 - 登入")
     col1, _ = st.columns([1, 2])
     with col1:
         username = st.text_input("帳號")
@@ -74,7 +70,6 @@ if st.session_state.user is None:
                 st.error("帳號或密碼錯誤！")
     st.stop()
 
-# 導覽列與標頭
 user = st.session_state.user
 st.sidebar.title(f"👤 {user['name']} ({user['role']})")
 st.sidebar.caption(f"職稱：{user['job_title']}")
@@ -104,15 +99,7 @@ if not df_raw.empty and "users" in df_raw.columns:
     df_leaves = df_raw
 else:
     df_leaves = pd.DataFrame(
-        columns=[
-            "id",
-            "user_id",
-            "leave_date",
-            "shift_type",
-            "status",
-            "name",
-            "job_title",
-        ]
+        columns=["id", "user_id", "leave_date", "shift_type", "status", "name", "job_title"]
     )
 
 notes_res = supabase.table("daily_notes").select("*").execute()
@@ -132,7 +119,8 @@ with tab1:
     with c1:
         leave_date = st.date_input("選擇休假日期", min_value=datetime.date.today())
     with c2:
-        shift_type = st.selectbox("選擇班別", ["早班", "中班", "夜班"])
+        # 班別選項改為：白班、小夜班、大夜班
+        shift_type = st.selectbox("選擇班別", ["白班", "小夜班", "大夜班"])
     with c3:
         st.write("")
         st.write("")
@@ -166,48 +154,51 @@ with tab1:
             warnings = []
             is_over_limit = False
 
-            if len(user_month_leaves) >= settings.get("max_monthly_leaves", 8):
+            # 1. 每月總休假天數限制
+            max_m_limit = int(settings.get("max_monthly_leaves", 8))
+            if len(user_month_leaves) >= max_m_limit:
                 is_over_limit = True
-                warnings.append(
-                    f"您本月排休已超過額度 ({settings.get('max_monthly_leaves', 8)}天)"
-                )
+                warnings.append(f"您本月排休已超過總額度 ({max_m_limit}天)")
 
+            # 2. 假日排休限制 (包含護理師各班別專屬限制)
             if leave_date.weekday() in [5, 6]:
                 weekend_count = 0
                 for l_date_str in user_month_leaves.get("leave_date", []):
-                    if (
-                        datetime.date.fromisoformat(l_date_str).weekday()
-                        in [5, 6]
-                    ):
+                    if datetime.date.fromisoformat(l_date_str).weekday() in [5, 6]:
                         weekend_count += 1
-                if weekend_count >= settings.get("max_weekend_leaves", 2):
-                    is_over_limit = True
-                    warnings.append(
-                        f"您本月假日排休已超過上限 ({settings.get('max_weekend_leaves', 2)}天)"
-                    )
+                
+                # 判斷是否為護理師專屬班別假日上限
+                if user["job_title"] == "護理師":
+                    shift_key_map = {"白班": "max_weekend_nurse_day", "小夜班": "max_weekend_nurse_night1", "大夜班": "max_weekend_nurse_night2"}
+                    weekend_limit = int(settings.get(shift_key_map.get(shift_type, ""), 2))
+                else:
+                    weekend_limit = int(settings.get("max_weekend_leaves", 2))
 
-            job_key_map = {
-                "護理師": "limit_nurse",
-                "照服員": "limit_caregiver",
-                "行政": "limit_staff",
-            }
-            job_limit = settings.get(
-                job_key_map.get(user["job_title"], ""), 99
-            )
-            same_job_leaves = (
+                if weekend_count >= weekend_limit:
+                    is_over_limit = True
+                    warnings.append(f"您本月假日排休已超過上限 ({weekend_limit}天)")
+
+            # 3. 每日各職稱 + 班別休假人數上限
+            if user["job_title"] == "護理師":
+                shift_limit_map = {"白班": "limit_nurse_day", "小夜班": "limit_nurse_night1", "大夜班": "limit_nurse_night2"}
+                daily_limit = int(settings.get(shift_limit_map.get(shift_type, ""), 2))
+            else:
+                job_key_map = {"照服員": "limit_caregiver", "行政": "limit_staff"}
+                daily_limit = int(settings.get(job_key_map.get(user["job_title"], ""), 99))
+
+            same_job_shift_leaves = (
                 df_leaves[
                     (df_leaves["leave_date"] == date_str)
                     & (df_leaves["job_title"] == user["job_title"])
+                    & (df_leaves["shift_type"] == shift_type)
                 ]
                 if not df_leaves.empty
                 else pd.DataFrame()
             )
 
-            if len(same_job_leaves) >= job_limit:
+            if len(same_job_shift_leaves) >= daily_limit:
                 is_over_limit = True
-                warnings.append(
-                    f"當天【{user['job_title']}】休假人數已達上限 ({job_limit}人)"
-                )
+                warnings.append(f"當天【{user['job_title']}-{shift_type}】休假人數已達上限 ({daily_limit}人)")
 
             status = "待協調/抽籤" if is_over_limit else "已預約"
 
@@ -222,9 +213,7 @@ with tab1:
 
             if is_over_limit:
                 warn_msg = "；".join(warnings)
-                st.warning(
-                    f"⚠️ 預約成功，但因【{warn_msg}】，您的申請標示為「待協調/抽籤」。"
-                )
+                st.warning(f"⚠️ 預約成功，但因【{warn_msg}】，您的申請標示為「待協調/抽籤」。")
             else:
                 st.success(f"✅ 成功預約 {date_str} ({shift_type}) 休假！")
             st.rerun()
@@ -252,7 +241,7 @@ with tab1:
                 }
             )
 
-    SHIFT_COLORS = {"早班": "#3B82F6", "中班": "#F59E0B", "夜班": "#8B5CF6"}
+    SHIFT_COLORS = {"白班": "#3B82F6", "小夜班": "#F59E0B", "大夜班": "#8B5CF6"}
     if not df_leaves.empty:
         for _, row in df_leaves.iterrows():
             if row["status"] == "👑 主管預排":
@@ -263,9 +252,7 @@ with tab1:
                 title_text = f"[{row['job_title']}] {row['name']} ({row['shift_type']}) ⚠️需協調"
             else:
                 color = SHIFT_COLORS.get(row["shift_type"], "#10B981")
-                title_text = (
-                    f"[{row['job_title']}] {row['name']} ({row['shift_type']})"
-                )
+                title_text = f"[{row['job_title']}] {row['name']} ({row['shift_type']})"
 
             calendar_events.append(
                 {
@@ -294,15 +281,9 @@ with tab1:
         "eventOrder": "order",
     }
 
-    cal_result = calendar(
-        events=calendar_events, options=calendar_options, key="leave_calendar"
-    )
+    cal_result = calendar(events=calendar_events, options=calendar_options, key="leave_calendar")
 
-    if (
-        cal_result
-        and "eventClick" in cal_result
-        and cal_result["eventClick"]
-    ):
+    if cal_result and "eventClick" in cal_result and cal_result["eventClick"]:
         event_info = cal_result["eventClick"]["event"]
         props = event_info.get("extendedProps", {})
         full_text = props.get("full_text", event_info.get("title", ""))
@@ -341,9 +322,7 @@ with tab2:
 
             with col_d:
                 if st.button("取消 / 刪除", key=f"del_{row['id']}"):
-                    supabase.table("leaves").delete().eq(
-                        "id", row["id"]
-                    ).execute()
+                    supabase.table("leaves").delete().eq("id", row["id"]).execute()
                     st.success("已取消該筆休假紀錄！")
                     st.rerun()
 
@@ -358,11 +337,7 @@ with tab3:
 
         # 1. 主管預排
         st.markdown("##### 📌 1. 主管預先指定員工休假")
-        users_res = (
-            supabase.table("users")
-            .select("id, name, job_title")
-            .execute()
-        )
+        users_res = supabase.table("users").select("id, name, job_title").execute()
         df_users_list = pd.DataFrame(users_res.data)
 
         pc1, pc2, pc3, pc4 = st.columns([2, 2, 2, 1])
@@ -371,20 +346,12 @@ with tab3:
                 f"{r['name']} ({r['job_title']})": r["id"]
                 for _, r in df_users_list.iterrows()
             }
-            selected_user_label = st.selectbox(
-                "選擇指定員工", list(user_options.keys())
-            )
+            selected_user_label = st.selectbox("選擇指定員工", list(user_options.keys()))
             target_user_id = user_options[selected_user_label]
         with pc2:
-            admin_target_date = st.date_input(
-                "指定休假日期",
-                datetime.date.today(),
-                key="admin_target_date",
-            )
+            admin_target_date = st.date_input("指定休假日期", datetime.date.today(), key="admin_target_date")
         with pc3:
-            admin_shift_type = st.selectbox(
-                "指定班別", ["早班", "中班", "夜班"], key="admin_shift"
-            )
+            admin_shift_type = st.selectbox("指定班別", ["白班", "小夜班", "大夜班"], key="admin_shift")
         with pc4:
             st.write("")
             st.write("")
@@ -398,40 +365,22 @@ with tab3:
                         "status": "👑 主管預排",
                     }
                 ).execute()
-                st.success(
-                    f"✅ 已成功為【{selected_user_label}】預先指定 {ad_date_str} 休假！"
-                )
+                st.success(f"✅ 已成功為【{selected_user_label}】預先指定 {ad_date_str} 休假！")
                 st.rerun()
 
         st.markdown("---")
 
         # 2. 人員帳號管理
-        st.markdown(
-            "##### 👥 2. 人員帳號管理與重設密碼 (可直接在表格內點擊修改)"
-        )
-
+        st.markdown("##### 👥 2. 人員帳號管理與重設密碼 (可直接在表格內點擊修改)")
         all_users_res = supabase.table("users").select("*").execute()
         df_all_users = pd.DataFrame(all_users_res.data)
-        df_all_users = df_all_users[
-            ["id", "name", "username", "password", "role", "job_title"]
-        ]
-        df_all_users.columns = [
-            "人員ID",
-            "姓名",
-            "帳號",
-            "密碼",
-            "權限角色",
-            "職稱",
-        ]
+        df_all_users = df_all_users[["id", "name", "username", "password", "role", "job_title"]]
+        df_all_users.columns = ["人員ID", "姓名", "帳號", "密碼", "權限角色", "職稱"]
 
         column_config = {
             "人員ID": st.column_config.NumberColumn("人員ID", disabled=True),
-            "權限角色": st.column_config.SelectboxColumn(
-                "權限角色", options=["員工", "主管"], required=True
-            ),
-            "職稱": st.column_config.SelectboxColumn(
-                "職稱", options=["護理師", "照服員", "行政"], required=True
-            ),
+            "權限角色": st.column_config.SelectboxColumn("權限角色", options=["員工", "主管"], required=True),
+            "職稱": st.column_config.SelectboxColumn("職稱", options=["護理師", "照服員", "行政"], required=True),
         }
 
         edited_df = st.data_editor(
@@ -444,11 +393,7 @@ with tab3:
         )
 
         if st.button("💾 儲存所有人員變更"):
-            current_ids = [
-                int(row["人員ID"])
-                for _, row in edited_df.iterrows()
-                if pd.notna(row["人員ID"])
-            ]
+            current_ids = [int(row["人員ID"]) for _, row in edited_df.iterrows() if pd.notna(row["人員ID"])]
             all_db_ids = [u["id"] for u in all_users_res.data]
             to_delete = set(all_db_ids) - set(current_ids)
             for del_id in to_delete:
@@ -465,55 +410,59 @@ with tab3:
                 if pd.isna(row["人員ID"]):
                     supabase.table("users").insert(user_data).execute()
                 else:
-                    supabase.table("users").update(user_data).eq(
-                        "id", int(row["人員ID"])
-                    ).execute()
+                    supabase.table("users").update(user_data).eq("id", int(row["人員ID"])).execute()
 
             st.success("✅ 人員資料已成功儲存至雲端資料庫！")
             st.rerun()
 
         st.markdown("---")
 
-        # 3. 規則設定
+        # 3. 規則動態設定 (精細分班版)
         st.markdown("##### ⚙️ 3. 排休規則限制設定")
-        rc1, rc2, rc3 = st.columns(3)
 
-        with rc1:
-            set_month_max = st.number_input(
-                "每人每月預約上限 (天)",
-                value=int(settings.get("max_monthly_leaves", 8)),
-            )
-            set_weekend_max = st.number_input(
-                "每人每月假日(六/日)上限 (天)",
-                value=int(settings.get("max_weekend_leaves", 2)),
-            )
-        with rc2:
-            set_nurse_max = st.number_input(
-                "護理師每日休假人數上限",
-                value=int(settings.get("limit_nurse", 2)),
-            )
-            set_care_max = st.number_input(
-                "照服員每日休假人數上限",
-                value=int(settings.get("limit_caregiver", 5)),
-            )
-        with rc3:
-            set_staff_max = st.number_input(
-                "行政每日休假人數上限",
-                value=int(settings.get("limit_staff", 1)),
-            )
+        st.caption("全機構通用限制：")
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            set_month_max = st.number_input("每人每月預約總上限 (天)", value=int(settings.get("max_monthly_leaves", 8)))
+        with gc2:
+            set_weekend_max = st.number_input("非護理人員 每月假日上限 (天)", value=int(settings.get("max_weekend_leaves", 2)))
 
-        if st.button("儲存規則設定"):
+        st.caption("🏥 護理師專屬規則設定 (區分班別)：")
+        nc1, nc2 = st.columns(2)
+        with nc1:
+            st.write("**每月假日上限 (天)**")
+            set_nurse_wk_day = st.number_input("護理師-白班 假日上限", value=int(settings.get("max_weekend_nurse_day", 2)))
+            set_nurse_wk_n1 = st.number_input("護理師-小夜 假日上限", value=int(settings.get("max_weekend_nurse_night1", 2)))
+            set_nurse_wk_n2 = st.number_input("護理師-大夜 假日上限", value=int(settings.get("max_weekend_nurse_night2", 2)))
+
+        with nc2:
+            st.write("**每日休假人數上限 (人)**")
+            set_nurse_day = st.number_input("護理師-白班 每日休假上限", value=int(settings.get("limit_nurse_day", 2)))
+            set_nurse_n1 = st.number_input("護理師-小夜 每日休假上限", value=int(settings.get("limit_nurse_night1", 1)))
+            set_nurse_n2 = st.number_input("護理師-大夜 每日休假上限", value=int(settings.get("limit_nurse_night2", 1)))
+
+        st.caption("其他職務每日休假上限：")
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            set_care_max = st.number_input("照服員每日休假上限", value=int(settings.get("limit_caregiver", 5)))
+        with oc2:
+            set_staff_max = st.number_input("行政每日休假上限", value=int(settings.get("limit_staff", 1)))
+
+        if st.button("💾 儲存規則設定", type="primary"):
             new_rules = [
                 ("max_monthly_leaves", set_month_max),
                 ("max_weekend_leaves", set_weekend_max),
-                ("limit_nurse", set_nurse_max),
+                ("max_weekend_nurse_day", set_nurse_wk_day),
+                ("max_weekend_nurse_night1", set_nurse_wk_n1),
+                ("max_weekend_nurse_nurse_night2", set_nurse_wk_n2),
+                ("limit_nurse_day", set_nurse_day),
+                ("limit_nurse_night1", set_nurse_n1),
+                ("limit_nurse_night2", set_nurse_n2),
                 ("limit_caregiver", set_care_max),
                 ("limit_staff", set_staff_max),
             ]
             for k, v in new_rules:
-                supabase.table("system_settings").upsert(
-                    {"key": k, "value": v}
-                ).execute()
+                supabase.table("system_settings").upsert({"key": k, "value": v}).execute()
             st.success("✅ 排休規則已更新至雲端資料庫！")
             st.rerun()
 
@@ -523,9 +472,7 @@ with tab3:
         st.markdown("##### 📌 4. 每日行程備註與刪除預約")
         nb_col1, nb_col2, nb_col3 = st.columns([2, 3, 1])
         with nb_col1:
-            note_date = st.date_input(
-                "選擇日期", datetime.date.today(), key="note_date"
-            )
+            note_date = st.date_input("選擇日期", datetime.date.today(), key="note_date")
         with nb_col2:
             note_content = st.text_input("行程備註 (例: 督導查核、教育訓練)")
         with nb_col3:
@@ -533,9 +480,7 @@ with tab3:
             st.write("")
             if st.button("儲存備註"):
                 nd_str = note_date.strftime("%Y-%m-%d")
-                supabase.table("daily_notes").upsert(
-                    {"date": nd_str, "note": note_content}
-                ).execute()
+                supabase.table("daily_notes").upsert({"date": nd_str, "note": note_content}).execute()
                 st.success("備註已更新！")
                 st.rerun()
 
@@ -544,16 +489,8 @@ with tab3:
         # 5. Excel 匯出
         st.markdown("##### 📊 5. 匯出 Excel 清單")
         if not df_leaves.empty:
-            excel_data = df_leaves[
-                ["leave_date", "name", "job_title", "shift_type", "status"]
-            ].copy()
-            excel_data.columns = [
-                "休假日期",
-                "人員姓名",
-                "職稱",
-                "預約班別",
-                "審核狀態",
-            ]
+            excel_data = df_leaves[["leave_date", "name", "job_title", "shift_type", "status"]].copy()
+            excel_data.columns = ["休假日期", "人員姓名", "職稱", "預約班別", "審核狀態"]
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
