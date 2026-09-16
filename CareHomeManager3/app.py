@@ -87,6 +87,7 @@ leaves_res = (
     .select("id, user_id, leave_date, shift_type, leave_category, status, users(name, job_title)")
     .execute()
 )
+
 df_raw = pd.DataFrame(leaves_res.data)
 
 if not df_raw.empty and "users" in df_raw.columns:
@@ -206,15 +207,14 @@ with tab1:
 
             status = "待協調/抽籤" if is_over_limit else "已預約"
 
-            supabase.table("leaves").insert(
-                {
-                    "user_id": user["id"],
-                    "leave_date": date_str,
-                    "shift_type": shift_type,
-                    "leave_category": leave_category,
-                    "status": status,
-                }
-            ).execute()
+            # 寫入 Supabase
+            supabase.table("leaves").insert({
+                "user_id": user["id"],
+                "leave_date": date_str,
+                "leave_category": leave_category,
+                "shift_type": shift_type,
+                "status": status,
+            }).execute()
 
             if is_over_limit:
                 warn_msg = "；".join(warnings)
@@ -250,15 +250,22 @@ with tab1:
     if not df_leaves.empty:
         for _, row in df_leaves.iterrows():
             cat = row.get("leave_category", "月休")
+            
+            # 決定顯示標籤：月休只顯示班別，特休/半日休才顯示類別
+            if cat == "月休":
+                cat_label = row['shift_type']
+            else:
+                cat_label = f"{cat}-{row['shift_type']}"
+
             if row["status"] == "👑 主管預排":
                 color = "#EC4899"
-                title_text = f"👑 {row['name']}({cat}-{row['shift_type']})"
+                title_text = f"👑 {row['name']} ({cat_label})"
             elif "待協調" in row["status"]:
                 color = "#9CA3AF"
-                title_text = f"⚠️ {row['name']}({cat}-{row['shift_type']})"
+                title_text = f"⚠️ {row['name']} ({cat_label})"
             else:
                 color = SHIFT_COLORS.get(row["shift_type"], "#10B981")
-                title_text = f"[{row['job_title']}] {row['name']}({cat}-{row['shift_type']})"
+                title_text = f"{row['name']} ({cat_label})"
 
             calendar_events.append(
                 {
@@ -284,7 +291,7 @@ with tab1:
         "initialView": "dayGridMonth",
         "locale": "zh-tw",
         "buttonText": {"today": "今天", "month": "月", "week": "週"},
-        "dayMaxEvents": 3,  # 👈 解決問題2：單日超過 3 筆自動改為 "+更多" 彈窗點選！
+        "dayMaxEvents": 3,
         "eventOrder": "order",
     }
 
@@ -345,8 +352,8 @@ with tab3:
     else:
         st.subheader("👑 主管維護與管控專區")
 
-        # 1. 審核與變更排休狀態 (針對問題1新增)
-        st.markdown("##### ✏️ 1. 審核與調整員工排休狀態 (解決「待協調/抽籤」狀態修改)")
+        # 1. 審核與變更排休狀態
+        st.markdown("##### ✏️ 1. 審核與調整員工排休狀態")
         if df_leaves.empty:
             st.info("目前無任何排休申請。")
         else:
@@ -403,15 +410,14 @@ with tab3:
             st.write("")
             if st.button("送出預排", type="primary"):
                 ad_date_str = admin_target_date.strftime("%Y-%m-%d")
-                supabase.table("leaves").insert(
-                    {
-                        "user_id": target_user_id,
-                        "leave_date": ad_date_str,
-                        "shift_type": admin_shift_type,
-                        "leave_category": admin_leave_cat,
-                        "status": "👑 主管預排",
-                    }
-                ).execute()
+                supabase.table("leaves").insert({
+                    "user_id": target_user_id,
+                    "leave_date": ad_date_str,
+                    "leave_category": admin_leave_cat,
+                    "shift_type": admin_shift_type,
+                    "status": "👑 主管預排",
+                }).execute()
+
                 st.success(f"✅ 已成功為【{selected_user_label}】預先指定 {ad_date_str} ({admin_leave_cat}) 休假！")
                 st.rerun()
 
@@ -444,6 +450,7 @@ with tab3:
             all_db_ids = [u["id"] for u in all_users_res.data]
             to_delete = set(all_db_ids) - set(current_ids)
             for del_id in to_delete:
+                supabase.table("leaves").delete().eq("user_id", del_id).execute()
                 supabase.table("users").delete().eq("id", del_id).execute()
 
             for _, row in edited_df.iterrows():
@@ -536,8 +543,11 @@ with tab3:
         # 6. Excel 匯出
         st.markdown("##### 📊 6. 匯出 Excel 清單")
         if not df_leaves.empty:
-            excel_data = df_leaves[["leave_date", "name", "job_title", "leave_category", "shift_type", "status"]].copy()
-            excel_data.columns = ["休假日期", "人員姓名", "職稱", "休假類別", "預約班別", "審核狀態"]
+            excel_cols = ["leave_date", "name", "job_title", "leave_category", "shift_type", "status"]
+            excel_headers = ["休假日期", "人員姓名", "職稱", "休假類別", "預約班別", "審核狀態"]
+
+            excel_data = df_leaves[excel_cols].copy()
+            excel_data.columns = excel_headers
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
