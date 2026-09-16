@@ -33,7 +33,38 @@ def get_settings():
     return settings
 
 # ==========================================
-# 2. 登入與 Session 管理
+# 2. 國定假日與假日判斷邏輯
+# ==========================================
+# 台灣國定假日清單 (2025/2026/2027)
+HOLIDAYS = {
+    # 2026 年國定假日
+    "2026-01-01",  # 元旦
+    "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20",  # 農曆春節
+    "2026-02-28",  # 二二八紀念日
+    "2026-04-03", "2026-04-04", "2026-04-05",  # 兒童節/清明節
+    "2026-06-19",  # 端午節
+    "2026-09-25",  # 中秋節
+    "2026-10-10",  # 國慶日
+    # 2027 年國定假日
+    "2027-01-01",  # 元旦
+    "2027-02-05", "2027-02-06", "2027-02-07", "2027-02-08", "2027-02-09",  # 農曆春節
+    "2027-02-28",  # 二二八紀念日
+    "2027-04-04", "2027-04-05",  # 兒童節/清明節
+    "2027-06-09",  # 端午節
+    "2027-09-15",  # 中秋節
+    "2027-10-10",  # 國慶日
+}
+
+def is_holiday_or_weekend(d: datetime.date) -> bool:
+    """判斷某天是否為星期六、星期日或國定假日"""
+    if d.weekday() in [5, 6]:
+        return True
+    if d.strftime("%Y-%m-%d") in HOLIDAYS:
+        return True
+    return False
+
+# ==========================================
+# 3. 登入與 Session 管理
 # ==========================================
 st.set_page_config(page_title="家園預約休假系統", layout="wide")
 
@@ -80,7 +111,7 @@ if st.sidebar.button("登出"):
 st.title("🏥 家園預約休假系統")
 
 # ==========================================
-# 3. 讀取資料
+# 4. 讀取資料
 # ==========================================
 leaves_res = (
     supabase.table("leaves")
@@ -134,6 +165,7 @@ with tab1:
 
     if submit_btn:
         date_str = leave_date.strftime("%Y-%m-%d")
+        is_hol = is_holiday_or_weekend(leave_date)
 
         user_same_day = (
             df_leaves[
@@ -157,20 +189,18 @@ with tab1:
                 else pd.DataFrame()
             )
 
-            warnings = []
-            is_over_limit = False
+            personal_warnings = []
 
-            # 1. 每月總休假天數限制
+            # 1. 檢查個人本月總天數
             max_m_limit = int(settings.get("max_monthly_leaves", 8))
             if len(user_month_leaves) >= max_m_limit:
-                is_over_limit = True
-                warnings.append(f"您本月排休已超過總額度 ({max_m_limit}天)")
+                personal_warnings.append(f"本月預約天數已超過總額度 ({max_m_limit}天)")
 
-            # 2. 假日排休限制
-            if leave_date.weekday() in [5, 6]:
+            # 2. 檢查個人假日天數 (含國定假日)
+            if is_hol:
                 weekend_count = 0
                 for l_date_str in user_month_leaves.get("leave_date", []):
-                    if datetime.date.fromisoformat(l_date_str).weekday() in [5, 6]:
+                    if is_holiday_or_weekend(datetime.date.fromisoformat(l_date_str)):
                         weekend_count += 1
                 
                 if user["job_title"] == "護理師":
@@ -180,15 +210,20 @@ with tab1:
                     weekend_limit = int(settings.get("max_weekend_leaves", 2))
 
                 if weekend_count >= weekend_limit:
-                    is_over_limit = True
-                    warnings.append(f"您本月假日排休已超過上限 ({weekend_limit}天)")
+                    personal_warnings.append(f"本月假日(含國定假日)排休已超過上限 ({weekend_limit}天)")
 
-            # 3. 每日休假人數上限
+            # 3. 檢查當天同職稱同班別的人數限制 (劃分平日與假日)
             if user["job_title"] == "護理師":
-                shift_limit_map = {"白班": "limit_nurse_day", "小夜班": "limit_nurse_night1", "大夜班": "limit_nurse_night2"}
+                if is_hol:
+                    shift_limit_map = {"白班": "limit_nurse_day_hol", "小夜班": "limit_nurse_night1_hol", "大夜班": "limit_nurse_night2_hol"}
+                else:
+                    shift_limit_map = {"白班": "limit_nurse_day_wd", "小夜班": "limit_nurse_night1_wd", "大夜班": "limit_nurse_night2_wd"}
                 daily_limit = int(settings.get(shift_limit_map.get(shift_type, ""), 2))
             else:
-                job_key_map = {"照服員": "limit_caregiver", "行政": "limit_staff"}
+                if is_hol:
+                    job_key_map = {"照服員": "limit_caregiver_hol", "行政": "limit_staff_hol"}
+                else:
+                    job_key_map = {"照服員": "limit_caregiver_wd", "行政": "limit_staff_wd"}
                 daily_limit = int(settings.get(job_key_map.get(user["job_title"], ""), 99))
 
             same_job_shift_leaves = (
@@ -201,26 +236,38 @@ with tab1:
                 else pd.DataFrame()
             )
 
-            if len(same_job_shift_leaves) >= daily_limit:
-                is_over_limit = True
-                warnings.append(f"當天【{user['job_title']}-{shift_type}】休假人數已達上限 ({daily_limit}人)")
+            current_count = len(same_job_shift_leaves)
+            # 加上本次的新預約後是否超過限制
+            is_conflict = (current_count + 1) > daily_limit
+            new_status = "待協調/抽籤" if is_conflict else "已預約"
 
-            status = "待協調/抽籤" if is_over_limit else "已預約"
-
-            # 寫入 Supabase
+            # 新增本次預約
             supabase.table("leaves").insert({
                 "user_id": user["id"],
                 "leave_date": date_str,
                 "leave_category": leave_category,
                 "shift_type": shift_type,
-                "status": status,
+                "status": new_status,
             }).execute()
 
-            if is_over_limit:
-                warn_msg = "；".join(warnings)
-                st.warning(f"⚠️ 預約成功，但因【{warn_msg}】，您的申請標示為「待協調/抽籤」。")
+            # 如果發生人數衝突，將當天「同一職稱、同一班別」的所有舊預約全部更新為「待協調/抽籤」
+            if is_conflict and not same_job_shift_leaves.empty:
+                existing_ids = same_job_shift_leaves["id"].tolist()
+                for e_id in existing_ids:
+                    curr_st = same_job_shift_leaves[same_job_shift_leaves["id"] == e_id]["status"].values[0]
+                    if curr_st != "👑 主管預排":
+                        supabase.table("leaves").update({"status": "待協調/抽籤"}).eq("id", int(e_id)).execute()
+
+            # 顯示提示訊息
+            day_type_label = "假日/國定假日" if is_hol else "平日"
+            if is_conflict:
+                st.warning(f"⚠️ 當天({day_type_label})【{user['job_title']}-{shift_type}】休假人數超過上限 ({daily_limit}人)，當天該班別所有申請人均已轉為「待協調/抽籤」狀態。")
             else:
                 st.success(f"✅ 成功預約 {date_str} ({leave_category}-{shift_type}) 休假！")
+
+            if personal_warnings:
+                st.info("⚠️ 提醒：超過預約天數，請注意排休公平性！（" + "；".join(personal_warnings) + "）")
+
             st.rerun()
 
     st.markdown("---")
@@ -251,7 +298,6 @@ with tab1:
         for _, row in df_leaves.iterrows():
             cat = row.get("leave_category", "月休")
             
-            # 決定顯示標籤：月休只顯示班別，特休/半日休才顯示類別
             if cat == "月休":
                 cat_label = row['shift_type']
             else:
@@ -339,7 +385,44 @@ with tab2:
 
             with col_d:
                 if st.button("取消 / 刪除", key=f"del_{row['id']}"):
-                    supabase.table("leaves").delete().eq("id", row["id"]).execute()
+                    del_id = row['id']
+                    del_date_str = row['leave_date']
+                    del_date = datetime.date.fromisoformat(del_date_str)
+                    del_shift = row['shift_type']
+                    del_job = row['job_title']
+                    is_hol = is_holiday_or_weekend(del_date)
+
+                    # 刪除目標筆數
+                    supabase.table("leaves").delete().eq("id", del_id).execute()
+
+                    # 刪除後自動重新計算當天同班別是否解除了人數衝突
+                    remaining = df_leaves[
+                        (df_leaves["leave_date"] == del_date_str)
+                        & (df_leaves["job_title"] == del_job)
+                        & (df_leaves["shift_type"] == del_shift)
+                        & (df_leaves["id"] != del_id)
+                    ]
+
+                    if del_job == "護理師":
+                        if is_hol:
+                            shift_limit_map = {"白班": "limit_nurse_day_hol", "小夜班": "limit_nurse_night1_hol", "大夜班": "limit_nurse_night2_hol"}
+                        else:
+                            shift_limit_map = {"白班": "limit_nurse_day_wd", "小夜班": "limit_nurse_night1_wd", "大夜班": "limit_nurse_night2_wd"}
+                        daily_limit = int(settings.get(shift_limit_map.get(del_shift, ""), 2))
+                    else:
+                        if is_hol:
+                            job_key_map = {"照服員": "limit_caregiver_hol", "行政": "limit_staff_hol"}
+                        else:
+                            job_key_map = {"照服員": "limit_caregiver_wd", "行政": "limit_staff_wd"}
+                        daily_limit = int(settings.get(job_key_map.get(del_job, ""), 99))
+
+                    # 若剩餘人數降回或低於上限，自動將剩餘的人恢復為「已預約」
+                    if len(remaining) <= daily_limit:
+                        for rem_id in remaining["id"].tolist():
+                            rem_st = remaining[remaining["id"] == rem_id]["status"].values[0]
+                            if rem_st != "👑 主管預排":
+                                supabase.table("leaves").update({"status": "已預約"}).eq("id", int(rem_id)).execute()
+
                     st.success("已取消該筆休假紀錄！")
                     st.rerun()
 
@@ -479,10 +562,10 @@ with tab3:
         with gc1:
             set_month_max = st.number_input("每人每月預約總上限 (天)", value=int(settings.get("max_monthly_leaves", 8)))
         with gc2:
-            set_weekend_max = st.number_input("非護理人員 每月假日上限 (天)", value=int(settings.get("max_weekend_leaves", 2)))
+            set_weekend_max = st.number_input("非護理人員 每月假日(含國定假日)上限 (天)", value=int(settings.get("max_weekend_leaves", 2)))
 
-        st.caption("🏥 護理師專屬規則設定 (區分班別)：")
-        nc1, nc2 = st.columns(2)
+        st.caption("🏥 護理師專屬規則設定 (區分班別與平假日)：")
+        nc1, nc2, nc3 = st.columns(3)
         with nc1:
             st.write("**每月假日上限 (天)**")
             set_nurse_wk_day = st.number_input("護理師-白班 假日上限", value=int(settings.get("max_weekend_nurse_day", 2)))
@@ -490,17 +573,27 @@ with tab3:
             set_nurse_wk_n2 = st.number_input("護理師-大夜 假日上限", value=int(settings.get("max_weekend_nurse_night2", 2)))
 
         with nc2:
-            st.write("**每日休假人數上限 (人)**")
-            set_nurse_day = st.number_input("護理師-白班 每日休假上限", value=int(settings.get("limit_nurse_day", 2)))
-            set_nurse_n1 = st.number_input("護理師-小夜 每日休假上限", value=int(settings.get("limit_nurse_night1", 1)))
-            set_nurse_n2 = st.number_input("護理師-大夜 每日休假上限", value=int(settings.get("limit_nurse_night2", 1)))
+            st.write("**【平日】每日休假上限 (人)**")
+            set_nurse_day_wd = st.number_input("白班 (平日)", value=int(settings.get("limit_nurse_day_wd", settings.get("limit_nurse_day", 2))))
+            set_nurse_n1_wd = st.number_input("小夜班 (平日)", value=int(settings.get("limit_nurse_night1_wd", settings.get("limit_nurse_night1", 1))))
+            set_nurse_n2_wd = st.number_input("大夜班 (平日)", value=int(settings.get("limit_nurse_night2_wd", settings.get("limit_nurse_night2", 1))))
 
-        st.caption("其他職務每日休假上限：")
+        with nc3:
+            st.write("**【假日/國定假日】每日休假上限 (人)**")
+            set_nurse_day_hol = st.number_input("白班 (假日)", value=int(settings.get("limit_nurse_day_hol", settings.get("limit_nurse_day", 2))))
+            set_nurse_n1_hol = st.number_input("小夜班 (假日)", value=int(settings.get("limit_nurse_night1_hol", settings.get("limit_nurse_night1", 1))))
+            set_nurse_n2_hol = st.number_input("大夜班 (假日)", value=int(settings.get("limit_nurse_night2_hol", settings.get("limit_nurse_night2", 1))))
+
+        st.caption("其他職務每日休假上限 (區分平假日)：")
         oc1, oc2 = st.columns(2)
         with oc1:
-            set_care_max = st.number_input("照服員每日休假上限", value=int(settings.get("limit_caregiver", 5)))
+            st.write("**照服員**")
+            set_care_wd = st.number_input("照服員 (平日上限)", value=int(settings.get("limit_caregiver_wd", settings.get("limit_caregiver", 5))))
+            set_care_hol = st.number_input("照服員 (假日/國定假日上限)", value=int(settings.get("limit_caregiver_hol", settings.get("limit_caregiver", 3))))
         with oc2:
-            set_staff_max = st.number_input("行政每日休假上限", value=int(settings.get("limit_staff", 1)))
+            st.write("**行政人員**")
+            set_staff_wd = st.number_input("行政 (平日上限)", value=int(settings.get("limit_staff_wd", settings.get("limit_staff", 1))))
+            set_staff_hol = st.number_input("行政 (假日/國定假日上限)", value=int(settings.get("limit_staff_hol", settings.get("limit_staff", 1))))
 
         if st.button("💾 儲存規則設定", type="primary"):
             new_rules = [
@@ -509,11 +602,16 @@ with tab3:
                 ("max_weekend_nurse_day", set_nurse_wk_day),
                 ("max_weekend_nurse_night1", set_nurse_wk_n1),
                 ("max_weekend_nurse_night2", set_nurse_wk_n2),
-                ("limit_nurse_day", set_nurse_day),
-                ("limit_nurse_night1", set_nurse_n1),
-                ("limit_nurse_night2", set_nurse_n2),
-                ("limit_caregiver", set_care_max),
-                ("limit_staff", set_staff_max),
+                ("limit_nurse_day_wd", set_nurse_day_wd),
+                ("limit_nurse_night1_wd", set_nurse_n1_wd),
+                ("limit_nurse_night2_wd", set_nurse_n2_wd),
+                ("limit_nurse_day_hol", set_nurse_day_hol),
+                ("limit_nurse_night1_hol", set_nurse_n1_hol),
+                ("limit_nurse_night2_hol", set_nurse_n2_hol),
+                ("limit_caregiver_wd", set_care_wd),
+                ("limit_caregiver_hol", set_care_hol),
+                ("limit_staff_wd", set_staff_wd),
+                ("limit_staff_hol", set_staff_hol),
             ]
             for k, v in new_rules:
                 supabase.table("system_settings").upsert({"key": k, "value": v}).execute()
