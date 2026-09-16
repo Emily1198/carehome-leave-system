@@ -77,14 +77,14 @@ if st.sidebar.button("登出"):
     st.session_state.user = None
     st.rerun()
 
-st.title("🏥 機構人員預約排休系統")
+st.title("🏥 家園預約休假系統")
 
 # ==========================================
 # 3. 讀取資料
 # ==========================================
 leaves_res = (
     supabase.table("leaves")
-    .select("id, user_id, leave_date, shift_type, status, users(name, job_title)")
+    .select("id, user_id, leave_date, shift_type, leave_category, status, users(name, job_title)")
     .execute()
 )
 df_raw = pd.DataFrame(leaves_res.data)
@@ -96,10 +96,14 @@ if not df_raw.empty and "users" in df_raw.columns:
     df_raw["job_title"] = df_raw["users"].apply(
         lambda x: x.get("job_title") if isinstance(x, dict) else ""
     )
+    if "leave_category" not in df_raw.columns:
+        df_raw["leave_category"] = "月休"
+    else:
+        df_raw["leave_category"] = df_raw["leave_category"].fillna("月休")
     df_leaves = df_raw
 else:
     df_leaves = pd.DataFrame(
-        columns=["id", "user_id", "leave_date", "shift_type", "status", "name", "job_title"]
+        columns=["id", "user_id", "leave_date", "shift_type", "leave_category", "status", "name", "job_title"]
     )
 
 notes_res = supabase.table("daily_notes").select("*").execute()
@@ -115,13 +119,14 @@ tab1, tab2, tab3 = st.tabs(["📅 月曆班表與預約", "📝 我的休假紀�
 with tab1:
     st.subheader("1. 申請預約休假")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
     with c1:
         leave_date = st.date_input("選擇休假日期", min_value=datetime.date.today())
     with c2:
-        # 班別選項改為：白班、小夜班、大夜班
-        shift_type = st.selectbox("選擇班別", ["白班", "小夜班", "大夜班"])
+        leave_category = st.selectbox("休假類別", ["月休", "特休", "上午休", "下午休"], index=0)
     with c3:
+        shift_type = st.selectbox("選擇班別", ["白班", "小夜班", "大夜班"])
+    with c4:
         st.write("")
         st.write("")
         submit_btn = st.button("提交預約", type="primary")
@@ -160,14 +165,13 @@ with tab1:
                 is_over_limit = True
                 warnings.append(f"您本月排休已超過總額度 ({max_m_limit}天)")
 
-            # 2. 假日排休限制 (包含護理師各班別專屬限制)
+            # 2. 假日排休限制
             if leave_date.weekday() in [5, 6]:
                 weekend_count = 0
                 for l_date_str in user_month_leaves.get("leave_date", []):
                     if datetime.date.fromisoformat(l_date_str).weekday() in [5, 6]:
                         weekend_count += 1
                 
-                # 判斷是否為護理師專屬班別假日上限
                 if user["job_title"] == "護理師":
                     shift_key_map = {"白班": "max_weekend_nurse_day", "小夜班": "max_weekend_nurse_night1", "大夜班": "max_weekend_nurse_night2"}
                     weekend_limit = int(settings.get(shift_key_map.get(shift_type, ""), 2))
@@ -178,7 +182,7 @@ with tab1:
                     is_over_limit = True
                     warnings.append(f"您本月假日排休已超過上限 ({weekend_limit}天)")
 
-            # 3. 每日各職稱 + 班別休假人數上限
+            # 3. 每日休假人數上限
             if user["job_title"] == "護理師":
                 shift_limit_map = {"白班": "limit_nurse_day", "小夜班": "limit_nurse_night1", "大夜班": "limit_nurse_night2"}
                 daily_limit = int(settings.get(shift_limit_map.get(shift_type, ""), 2))
@@ -207,6 +211,7 @@ with tab1:
                     "user_id": user["id"],
                     "leave_date": date_str,
                     "shift_type": shift_type,
+                    "leave_category": leave_category,
                     "status": status,
                 }
             ).execute()
@@ -215,7 +220,7 @@ with tab1:
                 warn_msg = "；".join(warnings)
                 st.warning(f"⚠️ 預約成功，但因【{warn_msg}】，您的申請標示為「待協調/抽籤」。")
             else:
-                st.success(f"✅ 成功預約 {date_str} ({shift_type}) 休假！")
+                st.success(f"✅ 成功預約 {date_str} ({leave_category}-{shift_type}) 休假！")
             st.rerun()
 
     st.markdown("---")
@@ -244,15 +249,16 @@ with tab1:
     SHIFT_COLORS = {"白班": "#3B82F6", "小夜班": "#F59E0B", "大夜班": "#8B5CF6"}
     if not df_leaves.empty:
         for _, row in df_leaves.iterrows():
+            cat = row.get("leave_category", "月休")
             if row["status"] == "👑 主管預排":
                 color = "#EC4899"
-                title_text = f"👑 [主管預排] {row['name']} ({row['shift_type']})"
-            elif row["status"] == "待協調/抽籤":
+                title_text = f"👑 {row['name']}({cat}-{row['shift_type']})"
+            elif "待協調" in row["status"]:
                 color = "#9CA3AF"
-                title_text = f"[{row['job_title']}] {row['name']} ({row['shift_type']}) ⚠️需協調"
+                title_text = f"⚠️ {row['name']}({cat}-{row['shift_type']})"
             else:
                 color = SHIFT_COLORS.get(row["shift_type"], "#10B981")
-                title_text = f"[{row['job_title']}] {row['name']} ({row['shift_type']})"
+                title_text = f"[{row['job_title']}] {row['name']}({cat}-{row['shift_type']})"
 
             calendar_events.append(
                 {
@@ -264,7 +270,7 @@ with tab1:
                     "order": 1,
                     "extendedProps": {
                         "type": "leave",
-                        "full_text": f"👤 人員：{row['name']}\n💼 職稱：{row['job_title']}\n⏰ 預約班別：{row['shift_type']}\n📌 狀態：{row['status']}",
+                        "full_text": f"👤 人員：{row['name']}\n💼 職稱：{row['job_title']}\n🏖️ 休假類別：{cat}\n⏰ 預約班別：{row['shift_type']}\n📌 狀態：{row['status']}",
                     },
                 }
             )
@@ -278,6 +284,7 @@ with tab1:
         "initialView": "dayGridMonth",
         "locale": "zh-tw",
         "buttonText": {"today": "今天", "month": "月", "week": "週"},
+        "dayMaxEvents": 3,  # 👈 解決問題2：單日超過 3 筆自動改為 "+更多" 彈窗點選！
         "eventOrder": "order",
     }
 
@@ -311,14 +318,17 @@ with tab2:
         st.info("您目前沒有任何休假預約或預排紀錄。")
     else:
         for idx, row in my_leaves.iterrows():
+            cat = row.get("leave_category", "月休")
             col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 1])
             col_a.write(f"📅 **{row['leave_date']}**")
-            col_b.write(f"班別：{row['shift_type']}")
+            col_b.write(f"類別：{cat}（{row['shift_type']}）")
 
             if row["status"] == "👑 主管預排":
                 col_c.write("狀態：`:pink[👑 主管指定預排]`")
+            elif "待協調" in row["status"]:
+                col_c.write(f"狀態：`:orange[{row['status']}]`")
             else:
-                col_c.write(f"狀態：`{row['status']}`")
+                col_c.write(f"狀態：`:green[{row['status']}]`")
 
             with col_d:
                 if st.button("取消 / 刪除", key=f"del_{row['id']}"):
@@ -335,12 +345,46 @@ with tab3:
     else:
         st.subheader("👑 主管維護與管控專區")
 
-        # 1. 主管預排
-        st.markdown("##### 📌 1. 主管預先指定員工休假")
+        # 1. 審核與變更排休狀態 (針對問題1新增)
+        st.markdown("##### ✏️ 1. 審核與調整員工排休狀態 (解決「待協調/抽籤」狀態修改)")
+        if df_leaves.empty:
+            st.info("目前無任何排休申請。")
+        else:
+            df_leaves_edit = df_leaves[["id", "leave_date", "name", "job_title", "leave_category", "shift_type", "status"]].copy()
+            df_leaves_edit.columns = ["紀錄ID", "日期", "姓名", "職稱", "休假類別", "班別", "審核狀態"]
+            
+            column_config_leaves = {
+                "紀錄ID": st.column_config.NumberColumn("紀錄ID", disabled=True),
+                "日期": st.column_config.TextColumn("日期", disabled=True),
+                "姓名": st.column_config.TextColumn("姓名", disabled=True),
+                "職稱": st.column_config.TextColumn("職稱", disabled=True),
+                "休假類別": st.column_config.TextColumn("休假類別", disabled=True),
+                "班別": st.column_config.TextColumn("班別", disabled=True),
+                "審核狀態": st.column_config.SelectboxColumn("審核狀態", options=["已預約", "待協調/抽籤", "👑 主管預排"], required=True),
+            }
+
+            edited_leaves_df = st.data_editor(
+                df_leaves_edit,
+                column_config=column_config_leaves,
+                use_container_width=True,
+                hide_index=True,
+                key="leave_editor",
+            )
+
+            if st.button("💾 儲存審核狀態變更", type="primary"):
+                for _, r in edited_leaves_df.iterrows():
+                    supabase.table("leaves").update({"status": r["審核狀態"]}).eq("id", int(r["紀錄ID"])).execute()
+                st.success("✅ 所有排休審核狀態已成功更新！")
+                st.rerun()
+
+        st.markdown("---")
+
+        # 2. 主管預排
+        st.markdown("##### 📌 2. 主管預先指定員工休假")
         users_res = supabase.table("users").select("id, name, job_title").execute()
         df_users_list = pd.DataFrame(users_res.data)
 
-        pc1, pc2, pc3, pc4 = st.columns([2, 2, 2, 1])
+        pc1, pc2, pc3, pc4, pc5 = st.columns([2, 2, 2, 2, 1])
         with pc1:
             user_options = {
                 f"{r['name']} ({r['job_title']})": r["id"]
@@ -351,8 +395,10 @@ with tab3:
         with pc2:
             admin_target_date = st.date_input("指定休假日期", datetime.date.today(), key="admin_target_date")
         with pc3:
-            admin_shift_type = st.selectbox("指定班別", ["白班", "小夜班", "大夜班"], key="admin_shift")
+            admin_leave_cat = st.selectbox("休假類別", ["月休", "特休", "上午休", "下午休"], index=0, key="admin_cat")
         with pc4:
+            admin_shift_type = st.selectbox("指定班別", ["白班", "小夜班", "大夜班"], key="admin_shift")
+        with pc5:
             st.write("")
             st.write("")
             if st.button("送出預排", type="primary"):
@@ -362,16 +408,17 @@ with tab3:
                         "user_id": target_user_id,
                         "leave_date": ad_date_str,
                         "shift_type": admin_shift_type,
+                        "leave_category": admin_leave_cat,
                         "status": "👑 主管預排",
                     }
                 ).execute()
-                st.success(f"✅ 已成功為【{selected_user_label}】預先指定 {ad_date_str} 休假！")
+                st.success(f"✅ 已成功為【{selected_user_label}】預先指定 {ad_date_str} ({admin_leave_cat}) 休假！")
                 st.rerun()
 
         st.markdown("---")
 
-        # 2. 人員帳號管理
-        st.markdown("##### 👥 2. 人員帳號管理與重設密碼 (可直接在表格內點擊修改)")
+        # 3. 人員帳號管理
+        st.markdown("##### 👥 3. 人員帳號管理與重設密碼 (可直接在表格內點擊修改)")
         all_users_res = supabase.table("users").select("*").execute()
         df_all_users = pd.DataFrame(all_users_res.data)
         df_all_users = df_all_users[["id", "name", "username", "password", "role", "job_title"]]
@@ -417,8 +464,8 @@ with tab3:
 
         st.markdown("---")
 
-        # 3. 規則動態設定 (精細分班版)
-        st.markdown("##### ⚙️ 3. 排休規則限制設定")
+        # 4. 規則動態設定
+        st.markdown("##### ⚙️ 4. 排休規則限制設定")
 
         st.caption("全機構通用限制：")
         gc1, gc2 = st.columns(2)
@@ -454,7 +501,7 @@ with tab3:
                 ("max_weekend_leaves", set_weekend_max),
                 ("max_weekend_nurse_day", set_nurse_wk_day),
                 ("max_weekend_nurse_night1", set_nurse_wk_n1),
-                ("max_weekend_nurse_nurse_night2", set_nurse_wk_n2),
+                ("max_weekend_nurse_night2", set_nurse_wk_n2),
                 ("limit_nurse_day", set_nurse_day),
                 ("limit_nurse_night1", set_nurse_n1),
                 ("limit_nurse_night2", set_nurse_n2),
@@ -468,8 +515,8 @@ with tab3:
 
         st.markdown("---")
 
-        # 4. 每日行程備註
-        st.markdown("##### 📌 4. 每日行程備註與刪除預約")
+        # 5. 每日行程備註
+        st.markdown("##### 📌 5. 每日行程備註")
         nb_col1, nb_col2, nb_col3 = st.columns([2, 3, 1])
         with nb_col1:
             note_date = st.date_input("選擇日期", datetime.date.today(), key="note_date")
@@ -486,11 +533,11 @@ with tab3:
 
         st.markdown("---")
 
-        # 5. Excel 匯出
-        st.markdown("##### 📊 5. 匯出 Excel 清單")
+        # 6. Excel 匯出
+        st.markdown("##### 📊 6. 匯出 Excel 清單")
         if not df_leaves.empty:
-            excel_data = df_leaves[["leave_date", "name", "job_title", "shift_type", "status"]].copy()
-            excel_data.columns = ["休假日期", "人員姓名", "職稱", "預約班別", "審核狀態"]
+            excel_data = df_leaves[["leave_date", "name", "job_title", "leave_category", "shift_type", "status"]].copy()
+            excel_data.columns = ["休假日期", "人員姓名", "職稱", "休假類別", "預約班別", "審核狀態"]
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
