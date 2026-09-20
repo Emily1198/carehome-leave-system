@@ -105,13 +105,13 @@ def show_submission_result_dialog(title, messages, is_warning=False):
 # ==========================================
 # 3. 登入與 Session 管理
 # ==========================================
-st.set_page_config(page_title="機構排休預約系統", layout="wide")
+st.set_page_config(page_title="家園預約休假系統", layout="wide")
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
 if st.session_state.user is None:
-    st.title("🏥 機構內部排休預約系統 - 登入")
+    st.title("🏥 家園預約休假系統 - 登入")
     col1, _ = st.columns([1, 2])
     with col1:
         username = st.text_input("帳號")
@@ -147,7 +147,7 @@ if st.sidebar.button("登出"):
     st.session_state.user = None
     st.rerun()
 
-st.title("🏥 機構人員預約排休系統")
+st.title("🏥 家園預約休假系統")
 
 # ==========================================
 # 4. 讀取資料
