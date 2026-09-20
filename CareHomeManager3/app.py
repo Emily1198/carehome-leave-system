@@ -713,7 +713,12 @@ with tab3:
                 ("limit_staff_hol", set_staff_hol),
             ]
             for k, v in new_rules:
-                supabase.table("system_settings").upsert({"key": k, "value": str(v)}).execute()
+                res = supabase.table("system_settings").select("key").eq("key", k).execute()
+                if res.data:
+                    supabase.table("system_settings").update({"value": str(v)}).eq("key", k).execute()
+                else:
+                    supabase.table("system_settings").insert({"key": k, "value": str(v)}).execute()
+
             st.success("✅ 排休規則與截止時間已成功儲存至雲端資料庫！")
             st.rerun()
 
