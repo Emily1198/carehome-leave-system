@@ -28,14 +28,17 @@ except Exception as e:
     st.stop()
 
 def get_settings():
-    res = supabase.table("system_settings").select("*").execute()
-    settings = {}
-    for item in res.data:
-        try:
-            settings[item["key"]] = float(item["value"])
-        except (ValueError, TypeError):
-            settings[item["key"]] = item["value"]
-    return settings
+    try:
+        res = supabase.table("system_settings").select("*").execute()
+        settings = {}
+        for item in res.data:
+            try:
+                settings[item["key"]] = float(item["value"])
+            except (ValueError, TypeError):
+                settings[item["key"]] = item["value"]
+        return settings
+    except Exception:
+        return {}
 
 # ==========================================
 # 2. 國定假日與假日判斷邏輯
@@ -203,7 +206,7 @@ with tab1:
     is_expired = False
     deadline_display_text = ""
 
-    if deadline_date_str and deadline_date_str != "0":
+    if deadline_date_str and deadline_date_str not in ["0", "None", "nan"]:
         deadline_display_text = f"📢 本月預約截止時間為：**{deadline_date_str} {deadline_time_str}**"
         try:
             deadline_dt = datetime.datetime.strptime(f"{deadline_date_str} {deadline_time_str}", "%Y-%m-%d %H:%M")
@@ -325,7 +328,6 @@ with tab1:
                     if curr_st != "👑 主管預排":
                         supabase.table("leaves").update({"status": "待協調/抽籤"}).eq("id", int(e_id)).execute()
 
-            # 彈出確認視窗，避免提醒消失
             day_type_label = "假日/國定假日" if is_hol else "平日"
             dialog_msgs = []
             
@@ -483,7 +485,6 @@ with tab3:
     else:
         st.subheader("👑 主管維護與管控專區")
 
-        # 刪除確認彈窗
         @st.dialog("⚠️ 刪除確認提醒")
         def confirm_delete_dialog(item):
             st.warning(f"確定要刪除【{item['name']}】於 {item['leave_date']} ({item['shift_type']}) 的排休紀錄嗎？")
@@ -642,14 +643,14 @@ with tab3:
         with dl_col1:
             curr_dl_date = settings.get("deadline_date", "")
             try:
-                def_date = datetime.date.fromisoformat(str(curr_dl_date)) if curr_dl_date and str(curr_dl_date) != "0" else datetime.date.today()
+                def_date = datetime.date.fromisoformat(str(curr_dl_date)) if curr_dl_date and str(curr_dl_date) not in ["0", "None", "nan"] else datetime.date.today()
             except ValueError:
                 def_date = datetime.date.today()
             set_dl_date = st.date_input("本月預約截止日期", value=def_date)
         with dl_col2:
             curr_dl_time = str(settings.get("deadline_time", "23:59"))
             try:
-                def_time = datetime.datetime.strptime(curr_dl_time, "%H:%M").time() if curr_dl_time and curr_dl_time != "0" else datetime.time(23, 59)
+                def_time = datetime.datetime.strptime(curr_dl_time, "%H:%M").time() if curr_dl_time and curr_dl_time not in ["0", "None", "nan"] else datetime.time(23, 59)
             except ValueError:
                 def_time = datetime.time(23, 59)
             set_dl_time = st.time_input("本月預約截止時間", value=def_time)
@@ -713,8 +714,7 @@ with tab3:
                 {"key": "limit_staff_hol", "value": str(set_staff_hol)},
             ]
             for item in new_rules:
-                supabase.table("system_settings").delete().eq("key", item["key"]).execute()
-                supabase.table("system_settings").insert(item).execute()
+                supabase.table("system_settings").upsert(item, on_conflict="key").execute()
 
             st.success("✅ 排休規則與截止時間已成功儲存至雲端資料庫！")
             st.rerun()
