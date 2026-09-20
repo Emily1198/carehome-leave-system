@@ -692,7 +692,7 @@ with tab3:
             set_staff_wd = st.number_input("行政 (平日上限)", value=int(float(settings.get("limit_staff_wd", settings.get("limit_staff", 1)))))
             set_staff_hol = st.number_input("行政 (假日/國定假日上限)", value=int(float(settings.get("limit_staff_hol", settings.get("limit_staff", 1)))))
 
-if st.button("💾 儲存規則與截止時間設定", type="primary"):
+        if st.button("💾 儲存規則與截止時間設定", type="primary"):
             new_rules = [
                 {"key": "deadline_date", "value": set_dl_date.strftime("%Y-%m-%d")},
                 {"key": "deadline_time", "value": set_dl_time.strftime("%H:%M")},
@@ -713,7 +713,6 @@ if st.button("💾 儲存規則與截止時間設定", type="primary"):
                 {"key": "limit_staff_hol", "value": str(set_staff_hol)},
             ]
             for item in new_rules:
-                # 採用先刪除舊資料再寫入新資料的方式，避免 UPDATE 觸發的權限與主鍵問題
                 supabase.table("system_settings").delete().eq("key", item["key"]).execute()
                 supabase.table("system_settings").insert(item).execute()
 
