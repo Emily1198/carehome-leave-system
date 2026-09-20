@@ -692,32 +692,30 @@ with tab3:
             set_staff_wd = st.number_input("行政 (平日上限)", value=int(float(settings.get("limit_staff_wd", settings.get("limit_staff", 1)))))
             set_staff_hol = st.number_input("行政 (假日/國定假日上限)", value=int(float(settings.get("limit_staff_hol", settings.get("limit_staff", 1)))))
 
-        if st.button("💾 儲存規則與截止時間設定", type="primary"):
+if st.button("💾 儲存規則與截止時間設定", type="primary"):
             new_rules = [
-                ("deadline_date", set_dl_date.strftime("%Y-%m-%d")),
-                ("deadline_time", set_dl_time.strftime("%H:%M")),
-                ("max_monthly_leaves", set_month_max),
-                ("max_weekend_leaves", set_weekend_max),
-                ("max_weekend_nurse_day", set_nurse_wk_day),
-                ("max_weekend_nurse_night1", set_nurse_wk_n1),
-                ("max_weekend_nurse_night2", set_nurse_wk_n2),
-                ("limit_nurse_day_wd", set_nurse_day_wd),
-                ("limit_nurse_night1_wd", set_nurse_n1_wd),
-                ("limit_nurse_night2_wd", set_nurse_n2_wd),
-                ("limit_nurse_day_hol", set_nurse_day_hol),
-                ("limit_nurse_night1_hol", set_nurse_n1_hol),
-                ("limit_nurse_night2_hol", set_nurse_n2_hol),
-                ("limit_caregiver_wd", set_care_wd),
-                ("limit_caregiver_hol", set_care_hol),
-                ("limit_staff_wd", set_staff_wd),
-                ("limit_staff_hol", set_staff_hol),
+                {"key": "deadline_date", "value": set_dl_date.strftime("%Y-%m-%d")},
+                {"key": "deadline_time", "value": set_dl_time.strftime("%H:%M")},
+                {"key": "max_monthly_leaves", "value": str(set_month_max)},
+                {"key": "max_weekend_leaves", "value": str(set_weekend_max)},
+                {"key": "max_weekend_nurse_day", "value": str(set_nurse_wk_day)},
+                {"key": "max_weekend_nurse_night1", "value": str(set_nurse_wk_n1)},
+                {"key": "max_weekend_nurse_night2", "value": str(set_nurse_wk_n2)},
+                {"key": "limit_nurse_day_wd", "value": str(set_nurse_day_wd)},
+                {"key": "limit_nurse_night1_wd", "value": str(set_nurse_n1_wd)},
+                {"key": "limit_nurse_night2_wd", "value": str(set_nurse_n2_wd)},
+                {"key": "limit_nurse_day_hol", "value": str(set_nurse_day_hol)},
+                {"key": "limit_nurse_night1_hol", "value": str(set_nurse_n1_hol)},
+                {"key": "limit_nurse_night2_hol", "value": str(set_nurse_n2_hol)},
+                {"key": "limit_caregiver_wd", "value": str(set_care_wd)},
+                {"key": "limit_caregiver_hol", "value": str(set_care_hol)},
+                {"key": "limit_staff_wd", "value": str(set_staff_wd)},
+                {"key": "limit_staff_hol", "value": str(set_staff_hol)},
             ]
-            for k, v in new_rules:
-                res = supabase.table("system_settings").select("key").eq("key", k).execute()
-                if res.data:
-                    supabase.table("system_settings").update({"value": str(v)}).eq("key", k).execute()
-                else:
-                    supabase.table("system_settings").insert({"key": k, "value": str(v)}).execute()
+            for item in new_rules:
+                # 採用先刪除舊資料再寫入新資料的方式，避免 UPDATE 觸發的權限與主鍵問題
+                supabase.table("system_settings").delete().eq("key", item["key"]).execute()
+                supabase.table("system_settings").insert(item).execute()
 
             st.success("✅ 排休規則與截止時間已成功儲存至雲端資料庫！")
             st.rerun()
