@@ -33,7 +33,6 @@ def get_settings():
         settings = {}
         for item in res.data:
             val = item["value"]
-            # 優先嘗試轉換成數字，若包含日期/時間字串則保留原字串
             try:
                 settings[item["key"]] = float(val)
             except (ValueError, TypeError):
@@ -41,6 +40,29 @@ def get_settings():
         return settings
     except Exception:
         return {}
+
+def is_date_locked(target_date_str: str, settings: dict) -> tuple[bool, str]:
+    """
+    判斷某個休假日期是否已超過主管設定的鎖定月份與截止時間。
+    回傳: (是否被鎖定, 提示訊息)
+    """
+    lock_ym = str(settings.get("lock_target_ym", ""))
+    dl_date_str = str(settings.get("deadline_date", ""))
+    dl_time_str = str(settings.get("deadline_time", "23:59"))
+
+    if not lock_ym or lock_ym in ["0", "None", "nan"] or not dl_date_str or dl_date_str in ["0", "None", "nan"]:
+        return False, ""
+
+    try:
+        dl_dt = datetime.datetime.strptime(f"{dl_date_str} {dl_time_str}", "%Y-%m-%d %H:%M")
+        target_ym = target_date_str[:7]  # 取得 YYYY-MM
+        # 若現在時間已超過截止時間，且目標日期落在「設定鎖定月份或更早之前」
+        if datetime.datetime.now() > dl_dt and target_ym <= lock_ym:
+            return True, f"⛔ **{lock_ym}（含）以前**的排休已於 {dl_date_str} {dl_time_str} 截止，員工無法再新增或異動（如需調整請聯繫主管）。"
+    except ValueError:
+        pass
+
+    return False, ""
 
 # ==========================================
 # 2. 國定假日與假日判斷邏輯
@@ -93,7 +115,6 @@ def check_and_restore_conflict(del_date_str: str, del_job: str, del_shift: str, 
             if rem_st != "👑 主管預排":
                 supabase.table("leaves").update({"status": "已預約"}).eq("id", int(rem_id)).execute()
 
-# 提示確認對話框
 @st.dialog("🔔 預約結果通知")
 def show_submission_result_dialog(title, messages, is_warning=False):
     if is_warning:
@@ -110,13 +131,13 @@ def show_submission_result_dialog(title, messages, is_warning=False):
 # ==========================================
 # 3. 登入與 Session 管理
 # ==========================================
-st.set_page_config(page_title="家園預約休假系統", layout="wide")
+st.set_page_config(page_title="機構排休預約系統", layout="wide")
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
 if st.session_state.user is None:
-    st.title("🏥 家園預約休假系統 - 登入")
+    st.title("🏥 機構內部排休預約系統 - 登入")
     col1, _ = st.columns([1, 2])
     with col1:
         username = st.text_input("帳號")
@@ -152,7 +173,7 @@ if st.sidebar.button("登出"):
     st.session_state.user = None
     st.rerun()
 
-st.title("🏥 家園預約休假系統")
+st.title("🏥 機構人員預約排休系統")
 
 # ==========================================
 # 4. 讀取資料
@@ -182,7 +203,7 @@ if not df_raw.empty and "users" in df_raw.columns:
     else:
         df_raw["admin_note"] = df_raw["admin_note"].fillna("")
         
-    df_leaves = df_raw
+    df_leaves = df_raw.sort_values(by="leave_date", ascending=True)
 else:
     df_leaves = pd.DataFrame(
         columns=["id", "user_id", "leave_date", "shift_type", "leave_category", "status", "admin_note", "name", "job_title"]
@@ -201,153 +222,152 @@ tab1, tab2, tab3 = st.tabs(["📅 月曆班表與預約", "📝 我的休假紀�
 with tab1:
     st.subheader("1. 申請預約休假")
 
-    # 檢查預約截止時間
+    # 顯示目前鎖定與開放公告
+    lock_ym_str = str(settings.get("lock_target_ym", ""))
     deadline_date_str = str(settings.get("deadline_date", ""))
     deadline_time_str = str(settings.get("deadline_time", "23:59"))
-    
-    is_expired = False
-    deadline_display_text = ""
 
-    if deadline_date_str and deadline_date_str not in ["0", "None", "nan"]:
-        deadline_display_text = f"📢 本月預約截止時間為：**{deadline_date_str} {deadline_time_str}**"
+    if lock_ym_str and lock_ym_str not in ["0", "None", "nan"] and deadline_date_str and deadline_date_str not in ["0", "None", "nan"]:
         try:
-            deadline_dt = datetime.datetime.strptime(f"{deadline_date_str} {deadline_time_str}", "%Y-%m-%d %H:%M")
-            if datetime.datetime.now() > deadline_dt:
-                is_expired = True
+            dl_dt = datetime.datetime.strptime(f"{deadline_date_str} {deadline_time_str}", "%Y-%m-%d %H:%M")
+            if datetime.datetime.now() > dl_dt:
+                st.warning(f"📢 公告：**{lock_ym_str}（含）以前**的月份已截止預約與修改；**{lock_ym_str} 之後**的月份仍開放線上預約！")
+            else:
+                st.info(f"📢 公告：**{lock_ym_str}（含）以前**的排休預約截止時間為 **{deadline_date_str} {deadline_time_str}**。")
         except ValueError:
             pass
 
-    if deadline_display_text:
-        if is_expired:
-            st.error(f"{deadline_display_text} （已截止預約）")
-        else:
-            st.info(deadline_display_text)
-
     c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
     with c1:
-        leave_date = st.date_input("選擇休假日期", min_value=datetime.date.today(), disabled=is_expired)
+        leave_date = st.date_input("選擇休假日期", min_value=datetime.date.today())
     with c2:
-        leave_category = st.selectbox("休假類別", ["月休", "特休", "上午休", "下午休"], index=0, disabled=is_expired)
+        leave_category = st.selectbox("休假類別", ["月休", "特休", "上午休", "下午休"], index=0)
     with c3:
-        shift_type = st.selectbox("選擇班別", ["白班", "小夜班", "大夜班"], disabled=is_expired)
+        shift_type = st.selectbox("選擇班別", ["白班", "小夜班", "大夜班"])
     with c4:
         st.write("")
         st.write("")
-        submit_btn = st.button("提交預約", type="primary", disabled=is_expired)
+        submit_btn = st.button("提交預約", type="primary")
 
-    if is_expired:
-        st.warning("⚠️ 目前已超過本月預約截止時間，系統不開放線上預約休假，如需調整請聯繫主管！")
+    # 即時提示所選日期是否已鎖定
+    selected_date_str = leave_date.strftime("%Y-%m-%d")
+    selected_locked, lock_msg = is_date_locked(selected_date_str, settings)
+    if selected_locked:
+        st.error(lock_msg)
 
-    if submit_btn and not is_expired:
-        date_str = leave_date.strftime("%Y-%m-%d")
-        is_hol = is_holiday_or_weekend(leave_date)
-
-        user_same_day = (
-            df_leaves[
-                (df_leaves["user_id"] == user["id"])
-                & (df_leaves["leave_date"] == date_str)
-            ]
-            if not df_leaves.empty
-            else pd.DataFrame()
-        )
-
-        if not user_same_day.empty:
-            show_submission_result_dialog("⚠️ 預約失敗", ["您當天已經有預約或主管已為您排休！"], is_warning=True)
+    if submit_btn:
+        if selected_locked:
+            show_submission_result_dialog("⛔ 該月份已截止預約", [lock_msg, "請選擇下下個月或之後的日期，或聯繫主管協助調整。"], is_warning=True)
         else:
-            month_str = leave_date.strftime("%Y-%m")
-            user_month_leaves = (
+            date_str = selected_date_str
+            is_hol = is_holiday_or_weekend(leave_date)
+
+            user_same_day = (
                 df_leaves[
                     (df_leaves["user_id"] == user["id"])
-                    & (df_leaves["leave_date"].str.startswith(month_str))
+                    & (df_leaves["leave_date"] == date_str)
                 ]
                 if not df_leaves.empty
                 else pd.DataFrame()
             )
 
-            personal_warnings = []
+            if not user_same_day.empty:
+                show_submission_result_dialog("⚠️ 預約失敗", ["您當天已經有預約或主管已為您排休！"], is_warning=True)
+            else:
+                month_str = leave_date.strftime("%Y-%m")
+                user_month_leaves = (
+                    df_leaves[
+                        (df_leaves["user_id"] == user["id"])
+                        & (df_leaves["leave_date"].str.startswith(month_str))
+                    ]
+                    if not df_leaves.empty
+                    else pd.DataFrame()
+                )
 
-            # 1. 檢查個人本月總天數
-            max_m_limit = int(float(settings.get("max_monthly_leaves", 8)))
-            if len(user_month_leaves) >= max_m_limit:
-                personal_warnings.append(f"• 本月預約天數已達到或超過上限額度 ({max_m_limit} 天)")
+                personal_warnings = []
 
-            # 2. 檢查個人假日天數 (含國定假日)
-            if is_hol:
-                weekend_count = 0
-                for l_date_str in user_month_leaves.get("leave_date", []):
-                    if is_holiday_or_weekend(datetime.date.fromisoformat(l_date_str)):
-                        weekend_count += 1
-                
+                # 1. 檢查個人本月總天數
+                max_m_limit = int(float(settings.get("max_monthly_leaves", 8)))
+                if len(user_month_leaves) >= max_m_limit:
+                    personal_warnings.append(f"• 本月預約天數已達到或超過上限額度 ({max_m_limit} 天)")
+
+                # 2. 檢查個人假日天數 (含國定假日)
+                if is_hol:
+                    weekend_count = 0
+                    for l_date_str in user_month_leaves.get("leave_date", []):
+                        if is_holiday_or_weekend(datetime.date.fromisoformat(l_date_str)):
+                            weekend_count += 1
+                    
+                    if user["job_title"] == "護理師":
+                        shift_key_map = {"白班": "max_weekend_nurse_day", "小夜班": "max_weekend_nurse_night1", "大夜班": "max_weekend_nurse_night2"}
+                        weekend_limit = int(float(settings.get(shift_key_map.get(shift_type, ""), 2)))
+                    else:
+                        weekend_limit = int(float(settings.get("max_weekend_leaves", 2)))
+
+                    if weekend_count >= weekend_limit:
+                        personal_warnings.append(f"• 本月假日(含國定假日)排休已達到或超過上限 ({weekend_limit} 天)")
+
+                # 3. 檢查當天同職稱同班別的人數限制
                 if user["job_title"] == "護理師":
-                    shift_key_map = {"白班": "max_weekend_nurse_day", "小夜班": "max_weekend_nurse_night1", "大夜班": "max_weekend_nurse_night2"}
-                    weekend_limit = int(float(settings.get(shift_key_map.get(shift_type, ""), 2)))
+                    if is_hol:
+                        shift_limit_map = {"白班": "limit_nurse_day_hol", "小夜班": "limit_nurse_night1_hol", "大夜班": "limit_nurse_night2_hol"}
+                    else:
+                        shift_limit_map = {"白班": "limit_nurse_day_wd", "小夜班": "limit_nurse_night1_wd", "大夜班": "limit_nurse_night2_wd"}
+                    daily_limit = int(float(settings.get(shift_limit_map.get(shift_type, ""), 2)))
                 else:
-                    weekend_limit = int(float(settings.get("max_weekend_leaves", 2)))
+                    if is_hol:
+                        job_key_map = {"照服員": "limit_caregiver_hol", "行政": "limit_staff_hol"}
+                    else:
+                        job_key_map = {"照服員": "limit_caregiver_wd", "行政": "limit_staff_wd"}
+                    daily_limit = int(float(settings.get(job_key_map.get(user["job_title"], ""), 99)))
 
-                if weekend_count >= weekend_limit:
-                    personal_warnings.append(f"• 本月假日(含國定假日)排休已達到或超過上限 ({weekend_limit} 天)")
+                same_job_shift_leaves = (
+                    df_leaves[
+                        (df_leaves["leave_date"] == date_str)
+                        & (df_leaves["job_title"] == user["job_title"])
+                        & (df_leaves["shift_type"] == shift_type)
+                    ]
+                    if not df_leaves.empty
+                    else pd.DataFrame()
+                )
 
-            # 3. 檢查當天同職稱同班別的人數限制
-            if user["job_title"] == "護理師":
-                if is_hol:
-                    shift_limit_map = {"白班": "limit_nurse_day_hol", "小夜班": "limit_nurse_night1_hol", "大夜班": "limit_nurse_night2_hol"}
+                current_count = len(same_job_shift_leaves)
+                is_conflict = (current_count + 1) > daily_limit
+                new_status = "待協調/抽籤" if is_conflict else "已預約"
+
+                supabase.table("leaves").insert({
+                    "user_id": user["id"],
+                    "leave_date": date_str,
+                    "leave_category": leave_category,
+                    "shift_type": shift_type,
+                    "status": new_status,
+                }).execute()
+
+                if is_conflict and not same_job_shift_leaves.empty:
+                    existing_ids = same_job_shift_leaves["id"].tolist()
+                    for e_id in existing_ids:
+                        curr_st = same_job_shift_leaves[same_job_shift_leaves["id"] == e_id]["status"].values[0]
+                        if curr_st != "👑 主管預排":
+                            supabase.table("leaves").update({"status": "待協調/抽籤"}).eq("id", int(e_id)).execute()
+
+                day_type_label = "假日/國定假日" if is_hol else "平日"
+                dialog_msgs = []
+                
+                if is_conflict:
+                    dialog_msgs.append(f"⚠️ 當天 ({day_type_label}) 【{user['job_title']}-{shift_type}】 預約人數已超過上限 ({daily_limit} 人)。")
+                    dialog_msgs.append("當天該班別所有申請人均已轉為「待協調/抽籤」狀態，請配合後續協調。")
                 else:
-                    shift_limit_map = {"白班": "limit_nurse_day_wd", "小夜班": "limit_nurse_night1_wd", "大夜班": "limit_nurse_night2_wd"}
-                daily_limit = int(float(settings.get(shift_limit_map.get(shift_type, ""), 2)))
-            else:
-                if is_hol:
-                    job_key_map = {"照服員": "limit_caregiver_hol", "行政": "limit_staff_hol"}
-                else:
-                    job_key_map = {"照服員": "limit_caregiver_wd", "行政": "limit_staff_wd"}
-                daily_limit = int(float(settings.get(job_key_map.get(user["job_title"], ""), 99)))
+                    dialog_msgs.append(f"✅ 已成功預約 {date_str} ({leave_category}-{shift_type}) 休假！")
 
-            same_job_shift_leaves = (
-                df_leaves[
-                    (df_leaves["leave_date"] == date_str)
-                    & (df_leaves["job_title"] == user["job_title"])
-                    & (df_leaves["shift_type"] == shift_type)
-                ]
-                if not df_leaves.empty
-                else pd.DataFrame()
-            )
+                if personal_warnings:
+                    dialog_msgs.append("\n【額度提醒事項】")
+                    dialog_msgs.extend(personal_warnings)
 
-            current_count = len(same_job_shift_leaves)
-            is_conflict = (current_count + 1) > daily_limit
-            new_status = "待協調/抽籤" if is_conflict else "已預約"
-
-            supabase.table("leaves").insert({
-                "user_id": user["id"],
-                "leave_date": date_str,
-                "leave_category": leave_category,
-                "shift_type": shift_type,
-                "status": new_status,
-            }).execute()
-
-            if is_conflict and not same_job_shift_leaves.empty:
-                existing_ids = same_job_shift_leaves["id"].tolist()
-                for e_id in existing_ids:
-                    curr_st = same_job_shift_leaves[same_job_shift_leaves["id"] == e_id]["status"].values[0]
-                    if curr_st != "👑 主管預排":
-                        supabase.table("leaves").update({"status": "待協調/抽籤"}).eq("id", int(e_id)).execute()
-
-            day_type_label = "假日/國定假日" if is_hol else "平日"
-            dialog_msgs = []
-            
-            if is_conflict:
-                dialog_msgs.append(f"⚠️ 當天 ({day_type_label}) 【{user['job_title']}-{shift_type}】 預約人數已超過上限 ({daily_limit} 人)。")
-                dialog_msgs.append("當天該班別所有申請人均已轉為「待協調/抽籤」狀態，請配合後續協調。")
-            else:
-                dialog_msgs.append(f"✅ 已成功預約 {date_str} ({leave_category}-{shift_type}) 休假！")
-
-            if personal_warnings:
-                dialog_msgs.append("\n【額度提醒事項】")
-                dialog_msgs.extend(personal_warnings)
-
-            show_submission_result_dialog(
-                title="⚠️ 休假預約已送出 (請確認詳情)" if is_conflict else "🎉 預約成功",
-                messages=dialog_msgs,
-                is_warning=is_conflict
-            )
+                show_submission_result_dialog(
+                    title="⚠️ 休假預約已送出 (請確認詳情)" if is_conflict else "🎉 預約成功",
+                    messages=dialog_msgs,
+                    is_warning=is_conflict
+                )
 
     st.markdown("---")
     st.subheader("2. 本月視覺化互動月曆")
@@ -466,17 +486,21 @@ with tab2:
                 col_c.write(f"狀態：`:green[{row['status']}]`")
 
             with col_d:
-                if st.button("取消 / 刪除", key=f"del_{row['id']}"):
-                    del_id = row['id']
-                    del_date_str = row['leave_date']
-                    del_shift = row['shift_type']
-                    del_job = row['job_title']
+                row_locked, _ = is_date_locked(row["leave_date"], settings)
+                if row_locked:
+                    st.caption("🔒 已截止鎖定")
+                else:
+                    if st.button("取消 / 刪除", key=f"del_{row['id']}"):
+                        del_id = row['id']
+                        del_date_str = row['leave_date']
+                        del_shift = row['shift_type']
+                        del_job = row['job_title']
 
-                    supabase.table("leaves").delete().eq("id", del_id).execute()
-                    check_and_restore_conflict(del_date_str, del_job, del_shift, del_id, df_leaves, settings)
+                        supabase.table("leaves").delete().eq("id", del_id).execute()
+                        check_and_restore_conflict(del_date_str, del_job, del_shift, del_id, df_leaves, settings)
 
-                    st.success("已取消該筆休假紀錄！")
-                    st.rerun()
+                        st.success("已取消該筆休假紀錄！")
+                        st.rerun()
 
 # ==========================================
 # Tab 3: 主管管理專區
@@ -502,53 +526,74 @@ with tab3:
                 if st.button("取消", use_container_width=True):
                     st.rerun()
 
-        # 1. 審核、備註與刪除
+        # 1. 審核、備註與刪除（加入月份篩選器）
         st.markdown("##### ✏️ 1. 審核、打字備註與調整員工排休狀態")
         if df_leaves.empty:
             st.info("目前無任何排休申請。")
         else:
-            df_leaves_edit = df_leaves[["id", "leave_date", "name", "job_title", "leave_category", "shift_type", "status", "admin_note"]].copy()
-            df_leaves_edit.columns = ["紀錄ID", "日期", "姓名", "職稱", "休假類別", "班別", "審核狀態", "主管審核備註"]
+            # 取得所有有紀錄的月份清單 + 預設當月
+            available_months = sorted(df_leaves["leave_date"].str[:7].unique().tolist(), reverse=True)
+            current_ym = datetime.date.today().strftime("%Y-%m")
+            if current_ym not in available_months:
+                available_months.insert(0, current_ym)
             
-            column_config_leaves = {
-                "紀錄ID": st.column_config.NumberColumn("紀錄ID", disabled=True),
-                "日期": st.column_config.TextColumn("日期", disabled=True),
-                "姓名": st.column_config.TextColumn("姓名", disabled=True),
-                "職稱": st.column_config.TextColumn("職稱", disabled=True),
-                "休假類別": st.column_config.TextColumn("休假類別", disabled=True),
-                "班別": st.column_config.TextColumn("班別", disabled=True),
-                "審核狀態": st.column_config.SelectboxColumn("審核狀態", options=["已預約", "待協調/抽籤", "👑 主管預排"], required=True),
-                "主管審核備註": st.column_config.TextColumn("主管審核備註", help="輸入特殊原因、備註說明等"),
-            }
+            filter_options = ["全部月份"] + available_months
+            default_filter_idx = filter_options.index(current_ym) if current_ym in filter_options else 0
 
-            edited_leaves_df = st.data_editor(
-                df_leaves_edit,
-                column_config=column_config_leaves,
-                use_container_width=True,
-                hide_index=True,
-                key="leave_editor",
-            )
+            f_col1, _ = st.columns([2, 3])
+            with f_col1:
+                selected_filter_month = st.selectbox("📅 篩選查看月份", filter_options, index=default_filter_idx)
 
-            col_btn1, col_btn2 = st.columns([2, 3])
-            with col_btn1:
-                if st.button("💾 儲存審核狀態與備註變更", type="primary"):
-                    for _, r in edited_leaves_df.iterrows():
-                        supabase.table("leaves").update({
-                            "status": r["審核狀態"],
-                            "admin_note": r["主管審核備註"] if pd.notna(r["主管審核備註"]) else ""
-                        }).eq("id", int(r["紀錄ID"])).execute()
-                    st.success("✅ 所有排休審核狀態與備註已成功更新！")
-                    st.rerun()
+            if selected_filter_month == "全部月份":
+                filtered_leaves = df_leaves.copy()
+            else:
+                filtered_leaves = df_leaves[df_leaves["leave_date"].str.startswith(selected_filter_month)].copy()
 
-            st.markdown("###### 🗑️ 強制刪除單筆員工排休（點擊跳出確認彈窗）：")
-            del_options = {
-                f"ID {r['id']} | {r['leave_date']} - {r['name']} ({r['job_title']}-{r['shift_type']})": r
-                for _, r in df_leaves.iterrows()
-            }
-            selected_del_label = st.selectbox("選擇要刪除的排休紀錄", list(del_options.keys()))
-            if st.button("🗑️ 刪除所選排休紀錄"):
-                target_item = del_options[selected_del_label]
-                confirm_delete_dialog(target_item)
+            if filtered_leaves.empty:
+                st.info(f"目前 **{selected_filter_month}** 尚無任何排休紀錄。")
+            else:
+                df_leaves_edit = filtered_leaves[["id", "leave_date", "name", "job_title", "leave_category", "shift_type", "status", "admin_note"]].copy()
+                df_leaves_edit.columns = ["紀錄ID", "日期", "姓名", "職稱", "休假類別", "班別", "審核狀態", "主管審核備註"]
+                
+                column_config_leaves = {
+                    "紀錄ID": st.column_config.NumberColumn("紀錄ID", disabled=True),
+                    "日期": st.column_config.TextColumn("日期", disabled=True),
+                    "姓名": st.column_config.TextColumn("姓名", disabled=True),
+                    "職稱": st.column_config.TextColumn("職稱", disabled=True),
+                    "休假類別": st.column_config.TextColumn("休假類別", disabled=True),
+                    "班別": st.column_config.TextColumn("班別", disabled=True),
+                    "審核狀態": st.column_config.SelectboxColumn("審核狀態", options=["已預約", "待協調/抽籤", "👑 主管預排"], required=True),
+                    "主管審核備註": st.column_config.TextColumn("主管審核備註", help="輸入特殊原因、備註說明等"),
+                }
+
+                edited_leaves_df = st.data_editor(
+                    df_leaves_edit,
+                    column_config=column_config_leaves,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=f"leave_editor_{selected_filter_month}",
+                )
+
+                col_btn1, col_btn2 = st.columns([2, 3])
+                with col_btn1:
+                    if st.button("💾 儲存審核狀態與備註變更", type="primary"):
+                        for _, r in edited_leaves_df.iterrows():
+                            supabase.table("leaves").update({
+                                "status": r["審核狀態"],
+                                "admin_note": r["主管審核備註"] if pd.notna(r["主管審核備註"]) else ""
+                            }).eq("id", int(r["紀錄ID"])).execute()
+                        st.success("✅ 所有排休審核狀態與備註已成功更新！")
+                        st.rerun()
+
+                st.markdown(f"###### 🗑️ 強制刪除單筆員工排休（目前顯示：{selected_filter_month}）：")
+                del_options = {
+                    f"ID {r['id']} | {r['leave_date']} - {r['name']} ({r['job_title']}-{r['shift_type']})": r
+                    for _, r in filtered_leaves.iterrows()
+                }
+                selected_del_label = st.selectbox("選擇要刪除的排休紀錄", list(del_options.keys()))
+                if st.button("🗑️ 刪除所選排休紀錄"):
+                    target_item = del_options[selected_del_label]
+                    confirm_delete_dialog(target_item)
 
         st.markdown("---")
 
@@ -637,25 +682,52 @@ with tab3:
 
         st.markdown("---")
 
-        # 4. 規則動態設定
+        # 4. 規則動態設定（支援鎖定指定月份及以前）
         st.markdown("##### ⚙️ 4. 排休規則限制與截止時間設定")
 
-        st.caption("⏰ 本月線上預約截止時間設定：")
-        dl_col1, dl_col2 = st.columns(2)
+        st.caption("⏰ 預約截止與月份鎖定設定（超過截止時間後，所選月份及更早之前的月份將鎖定禁止員工新增或取消，但更晚的月份仍開放預約）：")
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
+
+        # 產生前後 12 個月的月份選項 (YYYY-MM)
+        today = datetime.date.today()
+        month_choices = []
+        for offset in range(-2, 13):
+            y = today.year + (today.month - 1 + offset) // 12
+            m = (today.month - 1 + offset) % 12 + 1
+            month_choices.append(f"{y:04d}-{m:02d}")
+
+        # 預設為下個月
+        next_y = today.year + (today.month // 12)
+        next_m = (today.month % 12) + 1
+        default_next_ym = f"{next_y:04d}-{next_m:02d}"
+
+        curr_lock_ym = str(settings.get("lock_target_ym", default_next_ym))
+        if curr_lock_ym not in month_choices:
+            if curr_lock_ym and curr_lock_ym not in ["0", "None", "nan"]:
+                month_choices.insert(0, curr_lock_ym)
+            else:
+                curr_lock_ym = default_next_ym
+
         with dl_col1:
+            set_lock_ym = st.selectbox(
+                "停止預約目標月份（此月份及以前將鎖定）",
+                month_choices,
+                index=month_choices.index(curr_lock_ym),
+            )
+        with dl_col2:
             curr_dl_date = settings.get("deadline_date", "")
             try:
                 def_date = datetime.date.fromisoformat(str(curr_dl_date)) if curr_dl_date and str(curr_dl_date) not in ["0", "None", "nan"] else datetime.date.today()
             except ValueError:
                 def_date = datetime.date.today()
-            set_dl_date = st.date_input("本月預約截止日期", value=def_date)
-        with dl_col2:
+            set_dl_date = st.date_input("截止日期（設為過去日期即刻鎖定）", value=def_date)
+        with dl_col3:
             curr_dl_time = str(settings.get("deadline_time", "23:59"))
             try:
                 def_time = datetime.datetime.strptime(curr_dl_time, "%H:%M").time() if curr_dl_time and curr_dl_time not in ["0", "None", "nan"] else datetime.time(23, 59)
             except ValueError:
                 def_time = datetime.time(23, 59)
-            set_dl_time = st.time_input("本月預約截止時間", value=def_time)
+            set_dl_time = st.time_input("截止時間", value=def_time)
 
         st.caption("全機構通用限制：")
         gc1, gc2 = st.columns(2)
@@ -697,6 +769,7 @@ with tab3:
 
         if st.button("💾 儲存規則與截止時間設定", type="primary"):
             new_rules = [
+                {"key": "lock_target_ym", "value": set_lock_ym},
                 {"key": "deadline_date", "value": set_dl_date.strftime("%Y-%m-%d")},
                 {"key": "deadline_time", "value": set_dl_time.strftime("%H:%M")},
                 {"key": "max_monthly_leaves", "value": str(set_month_max)},
@@ -738,7 +811,8 @@ with tab3:
             st.write("")
             if st.button("儲存備註"):
                 nd_str = note_date.strftime("%Y-%m-%d")
-                supabase.table("daily_notes").upsert({"date": nd_str, "note": note_content}).execute()
+                supabase.table("daily_notes").delete().eq("date", nd_str).execute()
+                supabase.table("daily_notes").insert({"date": nd_str, "note": note_content}).execute()
                 st.success("備註已更新！")
                 st.rerun()
 
