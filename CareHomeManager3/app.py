@@ -41,6 +41,15 @@ def get_settings():
     except Exception:
         return {}
 
+def get_month_choices(prev_offsets=-2, next_offsets=13):
+    today = datetime.date.today()
+    choices = []
+    for offset in range(prev_offsets, next_offsets):
+        y = today.year + (today.month - 1 + offset) // 12
+        m = (today.month - 1 + offset) % 12 + 1
+        choices.append(f"{y:04d}-{m:02d}")
+    return choices
+
 def is_date_locked(target_date_str: str, settings: dict) -> tuple[bool, str]:
     """
     判斷某個休假日期是否已超過主管設定的鎖定月份與截止時間。
@@ -56,7 +65,6 @@ def is_date_locked(target_date_str: str, settings: dict) -> tuple[bool, str]:
     try:
         dl_dt = datetime.datetime.strptime(f"{dl_date_str} {dl_time_str}", "%Y-%m-%d %H:%M")
         target_ym = target_date_str[:7]  # 取得 YYYY-MM
-        # 若現在時間已超過截止時間，且目標日期落在「設定鎖定月份或更早之前」
         if datetime.datetime.now() > dl_dt and target_ym <= lock_ym:
             return True, f"⛔ **{lock_ym}（含）以前**的排休已於 {dl_date_str} {dl_time_str} 截止，員工無法再新增或異動（如需調整請聯繫主管）。"
     except ValueError:
@@ -372,6 +380,29 @@ with tab1:
     st.markdown("---")
     st.subheader("2. 本月視覺化互動月曆")
 
+    # 長假公告顯示區塊（讓同仁知道當月/指定月份誰有預約長假，方便錯開）
+    cal_month_choices = get_month_choices(-1, 6)
+    default_cal_ym = datetime.date.today().strftime("%Y-%m")
+    cal_default_idx = cal_month_choices.index(default_cal_ym) if default_cal_ym in cal_month_choices else 0
+
+    ann_col1, ann_col2 = st.columns([1.5, 4.5])
+    with ann_col1:
+        view_ann_ym = st.selectbox(
+            "📣 查看月份長假公告",
+            cal_month_choices,
+            index=cal_default_idx,
+            key="view_ann_ym",
+        )
+    ann_key = f"long_leave_announcement_{view_ann_ym}"
+    ann_text = str(settings.get(ann_key, "")).strip()
+
+    with ann_col2:
+        st.write("")
+        if ann_text and ann_text not in ["0", "None", "nan"]:
+            st.warning(f"🏖️ **【{view_ann_ym} 長假提醒公告】**（請同仁留意並錯開安排）\n\n{ann_text}")
+        else:
+            st.info(f"🏖️ **【{view_ann_ym} 長假提醒公告】**：目前尚無長假公告。")
+
     calendar_events = []
 
     if not df_notes.empty:
@@ -531,7 +562,6 @@ with tab3:
         if df_leaves.empty:
             st.info("目前無任何排休申請。")
         else:
-            # 取得所有有紀錄的月份清單 + 預設當月
             available_months = sorted(df_leaves["leave_date"].str[:7].unique().tolist(), reverse=True)
             current_ym = datetime.date.today().strftime("%Y-%m")
             if current_ym not in available_months:
@@ -688,15 +718,9 @@ with tab3:
         st.caption("⏰ 預約截止與月份鎖定設定（超過截止時間後，所選月份及更早之前的月份將鎖定禁止員工新增或取消，但更晚的月份仍開放預約）：")
         dl_col1, dl_col2, dl_col3 = st.columns(3)
 
-        # 產生前後 12 個月的月份選項 (YYYY-MM)
         today = datetime.date.today()
-        month_choices = []
-        for offset in range(-2, 13):
-            y = today.year + (today.month - 1 + offset) // 12
-            m = (today.month - 1 + offset) % 12 + 1
-            month_choices.append(f"{y:04d}-{m:02d}")
+        month_choices = get_month_choices(-2, 13)
 
-        # 預設為下個月
         next_y = today.year + (today.month // 12)
         next_m = (today.month % 12) + 1
         default_next_ym = f"{next_y:04d}-{next_m:02d}"
@@ -818,8 +842,46 @@ with tab3:
 
         st.markdown("---")
 
-        # 6. Excel 匯出
-        st.markdown("##### 📊 6. 匯出 Excel 清單")
+        # 6. 當月長假公告設定（顯示於月曆區，方便同仁錯開休長假）
+        st.markdown("##### 📣 6. 當月長假公告設定（顯示於互動月曆區，提醒同仁錯開）")
+        admin_ann_months = get_month_choices(-1, 6)
+        admin_ann_default_idx = admin_ann_months.index(current_ym) if current_ym in admin_ann_months else 0
+
+        a_col1, a_col2 = st.columns([1.5, 4.5])
+        with a_col1:
+            target_ann_ym = st.selectbox(
+                "選擇公告月份",
+                admin_ann_months,
+                index=admin_ann_default_idx,
+                key="target_ann_ym",
+            )
+        existing_ann_val = str(settings.get(f"long_leave_announcement_{target_ann_ym}", ""))
+        if existing_ann_val in ["0", "None", "nan"]:
+            existing_ann_val = ""
+
+        with a_col2:
+            ann_input_text = st.text_area(
+                "長假公告內容（例：王小明 12/10～12/16 休長假、陳小美 12/22～12/27 休長假，請大家安排時盡量錯開）",
+                value=existing_ann_val,
+                height=90,
+                key=f"ann_text_{target_ann_ym}",
+            )
+
+        if st.button("💾 儲存該月長假公告", type="primary"):
+            ann_db_key = f"long_leave_announcement_{target_ann_ym}"
+            try:
+                supabase.table("system_settings").delete().eq("key", ann_db_key).execute()
+                if ann_input_text.strip():
+                    supabase.table("system_settings").insert({"key": ann_db_key, "value": ann_input_text.strip()}).execute()
+                st.success(f"✅ 已更新 {target_ann_ym} 長假公告！")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 公告儲存失敗：{e}")
+
+        st.markdown("---")
+
+        # 7. Excel 匯出
+        st.markdown("##### 📊 7. 匯出 Excel 清單")
         if not df_leaves.empty:
             excel_cols = ["leave_date", "name", "job_title", "leave_category", "shift_type", "status", "admin_note"]
             excel_headers = ["休假日期", "人員姓名", "職稱", "休假類別", "預約班別", "審核狀態", "主管審核備註"]
